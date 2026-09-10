@@ -11,6 +11,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "   ⚓ 模拟器碧蓝航线换服工具 (AzurLane-Server-Switcher)       " -ForegroundColor Yellow
 Write-Host "   [测试声明] 已在 MuMu 模拟器 Android 15 环境全量实测通过   " -ForegroundColor Green
+Write-Host "   [免责声明] 仅供技术交流，使用产生的任何风险由用户自行承担" -ForegroundColor DarkGray
 Write-Host "============================================================" -ForegroundColor Cyan
 
 # ------------------------------------------------------------------------------
