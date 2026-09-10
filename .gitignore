@@ -1,6 +1,7 @@
 # Logs
 *.log
 .backup/
+*.zip
 
 # Windows system files
 Thumbs.db

@@ -4,8 +4,15 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-green.svg)](#)
 [![Tested On](https://img.shields.io/badge/Tested%20On-MuMu%20Player%20Android%2015-orange.svg)](#)
 
+[![Latest Release](https://img.shields.io/github/v/release/prover0721/AzurLane-Server-Switcher?color=brightgreen&label=%E6%9C%80%E6%96%B0%E7%89%88%E6%9C%AC%E7%9B%B4%E8%BE%BE%20v1.0.0)](https://github.com/prover0721/AzurLane-Server-Switcher/releases/latest)
+
 > **开箱即用的《碧蓝航线》跨服资源无损复用与共享工具。**  
 > 只要在模拟器内有一份完整下载的资源，即可实现所有其他区服（各渠道服、日服、国际服等）**零额外硬盘空间占用**、**零漫长等待**的一键极速复用！
+
+### 📥 普通玩家极速下载与使用 (3 步上手)
+1. 点击直达 **[👉 Releases 最新发布页面](https://github.com/prover0721/AzurLane-Server-Switcher/releases/latest)**，在页面下方下载 **`AzurLane-Server-Switcher-v1.0.0.zip`**；
+2. 解压到电脑任意文件夹；
+3. 保持 MuMu 模拟器开启，双击运行 **`一键运行.bat`**，按回车全自动搞定！
 
 ---
 
