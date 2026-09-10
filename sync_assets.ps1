@@ -18,22 +18,24 @@ Write-Host "============================================================" -Foreg
 # 1. 自动寻找 ADB 与 MuMu 模拟器路径
 # ------------------------------------------------------------------------------
 function Find-MuMuAdb {
-    $possiblePaths = @(
-        "D:\UU\MuMuPlayer\nx_device\15.0\shell\adb.exe",
-        "D:\UU\MuMuPlayer\nx_main\adb.exe",
-        "C:\Program Files\Netease\MuMuPlayer-12.0\nx_device\12.0\shell\adb.exe",
-        "C:\Program Files\Netease\MuMuPlayer-12.0\nx_main\adb.exe",
-        "C:\Program Files\Netease\MuMuPlayerGlobal-12.0\nx_device\12.0\shell\adb.exe",
-        "C:\Program Files (x86)\Netease\MuMuPlayer-12.0\nx_main\adb.exe",
-        "D:\Program Files\Netease\MuMuPlayer-12.0\nx_main\adb.exe",
-        "E:\Program Files\Netease\MuMuPlayer-12.0\nx_main\adb.exe"
-    )
-
-    foreach ($p in $possiblePaths) {
-        if (Test-Path $p) { return $p }
+    # 1. 优先从当前正在运行的 MuMu 模拟器进程动态定位安装路径
+    $mumuProcs = Get-Process -Name "MuMuNxMain", "MuMuPlayer", "NemuPlayer" -ErrorAction SilentlyContinue
+    foreach ($proc in $mumuProcs) {
+        if ($proc.Path) {
+            $baseDir = Split-Path $proc.Path
+            $candidates = @(
+                (Join-Path $baseDir "adb.exe"),
+                (Join-Path (Split-Path $baseDir) "nx_device\15.0\shell\adb.exe"),
+                (Join-Path (Split-Path $baseDir) "nx_device\12.0\shell\adb.exe"),
+                (Join-Path (Split-Path $baseDir) "nx_main\adb.exe")
+            )
+            foreach ($c in $candidates) {
+                if (Test-Path $c) { return $c }
+            }
+        }
     }
 
-    # 尝试从注册表寻找
+    # 2. 尝试从 Windows 注册表寻找
     $regPaths = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MuMuPlayer*",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\MuMuPlayer*"
@@ -42,15 +44,32 @@ function Find-MuMuAdb {
         $keys = Get-ItemProperty -Path $rp -ErrorAction SilentlyContinue
         foreach ($k in $keys) {
             if ($k.InstallLocation) {
-                $checkAdb = Join-Path $k.InstallLocation "nx_device\15.0\shell\adb.exe"
-                if (Test-Path $checkAdb) { return $checkAdb }
-                $checkAdb2 = Join-Path $k.InstallLocation "nx_main\adb.exe"
+                $checkAdb1 = Join-Path $k.InstallLocation "nx_device\15.0\shell\adb.exe"
+                if (Test-Path $checkAdb1) { return $checkAdb1 }
+                $checkAdb2 = Join-Path $k.InstallLocation "nx_device\12.0\shell\adb.exe"
                 if (Test-Path $checkAdb2) { return $checkAdb2 }
+                $checkAdb3 = Join-Path $k.InstallLocation "nx_main\adb.exe"
+                if (Test-Path $checkAdb3) { return $checkAdb3 }
             }
         }
     }
 
-    # 尝试系统 PATH 中的 adb
+    # 3. 扫描各盘符下的常见默认安装路径 (C, D, E, F 等)
+    $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
+    foreach ($drv in $drives) {
+        $checkList = @(
+            (Join-Path $drv "Program Files\Netease\MuMuPlayer-12.0\nx_device\12.0\shell\adb.exe"),
+            (Join-Path $drv "Program Files\Netease\MuMuPlayer-12.0\nx_main\adb.exe"),
+            (Join-Path $drv "Program Files (x86)\Netease\MuMuPlayer-12.0\nx_main\adb.exe"),
+            (Join-Path $drv "MuMuPlayer\nx_device\15.0\shell\adb.exe"),
+            (Join-Path $drv "MuMuPlayer\nx_main\adb.exe")
+        )
+        foreach ($p in $checkList) {
+            if (Test-Path $p) { return $p }
+        }
+    }
+
+    # 4. 尝试系统 PATH 中的 adb
     $cmdAdb = Get-Command "adb.exe" -ErrorAction SilentlyContinue
     if ($cmdAdb) { return $cmdAdb.Source }
 
@@ -62,7 +81,7 @@ $ADB_PATH = Find-MuMuAdb
 
 while (-not $ADB_PATH -or -not (Test-Path $ADB_PATH)) {
     Write-Host "[提示] 未能自动定位 MuMu 模拟器的 adb.exe！" -ForegroundColor Yellow
-    $userInput = Read-Host "请输入 MuMu 模拟器安装根目录 (例如 D:\UU\MuMuPlayer 或 C:\Program Files\Netease\MuMuPlayer-12.0)"
+    $userInput = Read-Host "请输入 MuMu 模拟器安装根目录 (例如 C:\Program Files\Netease\MuMuPlayer-12.0)"
     if ($userInput) {
         $check1 = Join-Path $userInput "nx_device\15.0\shell\adb.exe"
         $check2 = Join-Path $userInput "nx_main\adb.exe"
