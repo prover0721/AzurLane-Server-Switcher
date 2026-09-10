@@ -1,4 +1,4 @@
-# ⚓ 碧蓝航线跨服资源复用工具 (AzurLane-CrossServer-Sync)
+# ⚓ 模拟器碧蓝航线换服工具 (AzurLane-Server-Switcher)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Android-green.svg)](#)

@@ -1,6 +1,6 @@
 # ==============================================================================
-# 碧蓝航线 (Azur Lane) 跨服资源极速复用与共享工具
-# 项目名称：AzurLane-CrossServer-Sync
+# 碧蓝航线 (Azur Lane) 跨服资源极速复用与换服工具
+# 项目名称：模拟器碧蓝航线换服工具 (AzurLane-Server-Switcher)
 # 测试环境声明：已在 MuMu 模拟器（Android 15 内核 / 15.0 系列）实测通过
 # 核心前提要求：模拟器内需存在至少一份已下载完整的游戏资源（约 29GB）
 # ==============================================================================
@@ -9,7 +9,7 @@
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "   ⚓ 碧蓝航线跨服资源极速复用工具 (AzurLane-CrossServer-Sync)" -ForegroundColor Yellow
+Write-Host "   ⚓ 模拟器碧蓝航线换服工具 (AzurLane-Server-Switcher)       " -ForegroundColor Yellow
 Write-Host "   [测试声明] 已在 MuMu 模拟器 Android 15 环境全量实测通过   " -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
 
