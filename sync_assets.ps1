@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # 碧蓝航线 (Azur Lane) 跨服资源极速复用与换服工具
 # 项目名称：模拟器碧蓝航线换服工具 (AzurLane-Server-Switcher)
 # 测试环境声明：已在 MuMu 模拟器（Android 15 内核 / 15.0 系列）实测通过
@@ -14,11 +14,28 @@ Write-Host "   [测试声明] 已在 MuMu 模拟器 Android 15 环境全量实�
 Write-Host "   [免责声明] 仅供技术交流，使用产生的任何风险由用户自行承担" -ForegroundColor DarkGray
 Write-Host "============================================================" -ForegroundColor Cyan
 
-# ------------------------------------------------------------------------------
-# 1. 自动寻找 ADB 与 MuMu 模拟器路径
-# ------------------------------------------------------------------------------
+$allPresets = @{
+    "com.bilibili.azurlane"               = @{ Name = "B站官方服 / 官服"; IsCN = $true }
+    "com.bilibili.blhx.mi"                = @{ Name = "小米渠道服"; IsCN = $true }
+    "com.bilibili.blhx.uc"                = @{ Name = "九游 / UC 渠道服"; IsCN = $true }
+    "com.bilibili.blhx.vivo"              = @{ Name = "vivo 渠道服"; IsCN = $true }
+    "com.bilibili.blhx.huawei"            = @{ Name = "华为渠道服"; IsCN = $true }
+    "com.bilibili.azurlane.huawei"        = @{ Name = "华为渠道服 (旧)"; IsCN = $true }
+    "com.tencent.tmgp.bilibili.azurlane"  = @{ Name = "腾讯应用宝渠道服"; IsCN = $true }
+    "com.bilibili.blhx.nearme.gamecenter" = @{ Name = "OPPO 渠道服"; IsCN = $true }
+    "com.YoStarJP.AzurLane"               = @{ Name = "日服 (JP)"; IsCN = $false }
+    "com.YoStarEN.AzurLane"               = @{ Name = "国际服 / 美服 (EN)"; IsCN = $false }
+    "tw.sonet.bldhx"                      = @{ Name = "台服 (TW)"; IsCN = $false }
+    "com.hkmanjuu.azurlane.gp"            = @{ Name = "台服 (TW Google Play)"; IsCN = $false }
+    "com.xdg.p10010"                      = @{ Name = "韩服 (KR)"; IsCN = $false }
+}
+
+function Get-PkgDisplayName($pkg) {
+    if ($allPresets.ContainsKey($pkg)) { return $allPresets[$pkg].Name }
+    return "自定义区服"
+}
+
 function Find-MuMuAdb {
-    # 1. 优先从当前正在运行的 MuMu 模拟器进程动态定位安装路径
     $mumuProcs = Get-Process -Name "MuMuNxMain", "MuMuPlayer", "NemuPlayer" -ErrorAction SilentlyContinue
     foreach ($proc in $mumuProcs) {
         if ($proc.Path) {
@@ -35,7 +52,6 @@ function Find-MuMuAdb {
         }
     }
 
-    # 2. 尝试从 Windows 注册表寻找
     $regPaths = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\MuMuPlayer*",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\MuMuPlayer*"
@@ -54,7 +70,6 @@ function Find-MuMuAdb {
         }
     }
 
-    # 3. 扫描各盘符下的常见默认安装路径 (C, D, E, F 等)
     $drives = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root
     foreach ($drv in $drives) {
         $checkList = @(
@@ -69,14 +84,266 @@ function Find-MuMuAdb {
         }
     }
 
-    # 4. 尝试系统 PATH 中的 adb
     $cmdAdb = Get-Command "adb.exe" -ErrorAction SilentlyContinue
     if ($cmdAdb) { return $cmdAdb.Source }
-
     return $null
 }
 
-Write-Host "`n[1/5] 正在搜索并定位模拟器 ADB 通信环境..." -ForegroundColor Green
+function Get-DeviceAzurLanePackages($adb, $device) {
+    $raw = & $adb -s $device shell "pm list packages -3"
+    $list = @()
+    foreach ($line in $raw) {
+        if ($line -match "package:(.+)") {
+            $p = $matches[1].Trim()
+            if ($allPresets.ContainsKey($p) -or $p -like "*azurlane*" -or $p -like "*blhx*") {
+                $ver = (& $adb -s $device shell "cat /data/media/0/Android/data/$p/files/version.txt 2>/dev/null").Trim()
+                $dirCount = [int]((& $adb -s $device shell "ls /data/media/0/Android/data/$p/files/AssetBundles 2>/dev/null | wc -l").Trim())
+                $list += [PSCustomObject]@{
+                    Package  = $p
+                    Name     = Get-PkgDisplayName $p
+                    Version  = if ($ver) { $ver } else { "未初始化" }
+                    DirCount = $dirCount
+                    IsCN     = if ($allPresets.ContainsKey($p)) { $allPresets[$p].IsCN } else { $true }
+                }
+            }
+        }
+    }
+    return $list
+}
+
+function Sync-PackageWithinDevice($adb, $device, $sourcePkg, $targetPkg, $isCN, $mode) {
+    $srcDir = "/data/media/0/Android/data/$sourcePkg/files/AssetBundles"
+    $dstDataDir = "/data/media/0/Android/data/$targetPkg"
+    $dstFilesDir = "$dstDataDir/files"
+    $dstBundleDir = "$dstFilesDir/AssetBundles"
+
+    $targetUid = (& $adb -s $device shell "stat -c '%u' /data/data/$targetPkg 2>/dev/null || echo 10000").Trim()
+    if (-not $targetUid) { $targetUid = "10000" }
+
+    & $adb -s $device shell "mkdir -p $dstFilesDir" | Out-Null
+    $cpOp = if ($mode -eq "2") { "cp -r" } else { "cp -al" }
+    $script = "rm -rf $dstBundleDir && $cpOp $srcDir $dstFilesDir/"
+    if ($isCN) {
+        $script += " && cp -a /data/media/0/Android/data/$sourcePkg/files/hashes* $dstFilesDir/ && cp -a /data/media/0/Android/data/$sourcePkg/files/version* $dstFilesDir/"
+    }
+    $script += " && chmod -R 777 $dstFilesDir && chown -R ${targetUid}:ext_data_rw $dstDataDir"
+    & $adb -s $device shell $script | Out-Null
+}
+
+function Invoke-SingleDeviceSync($adb, $device) {
+    Write-Host "`n>>> 正在扫描设备 [$device] 内的碧蓝航线客户端..." -ForegroundColor Green
+    $pkgs = Get-DeviceAzurLanePackages $adb $device
+    if ($pkgs.Count -eq 0) {
+        Write-Host "[错误] 设备 [$device] 内未检测到任何碧蓝航线客户端！" -ForegroundColor Red
+        return
+    }
+
+    $sourceObj = $pkgs | Where-Object { $_.DirCount -ge 150 } | Select-Object -First 1
+    if (-not $sourceObj) {
+        Write-Host "`n[核心前提未满足] 设备中未能找到拥有完整资源（约 29GB）的客户端！" -ForegroundColor Red
+        Write-Host "若另一台多开设备有最新完整资源，请重启脚本选择【跨设备增量同步】。" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "  [√] 已选定完整数据源: $($sourceObj.Name) [$($sourceObj.Package)] (版本: $($sourceObj.Version))" -ForegroundColor Cyan
+    $candidates = @($pkgs | Where-Object { $_.Package -ne $sourceObj.Package })
+
+    $targetsToSync = @()
+    if ($candidates.Count -eq 0) {
+        $customChoice = Read-Host "`n未检测到其他区服，是否手动输入自定义包名进行映射？(Y/N，默认 N)"
+        if ($customChoice -match "^[Yy]") {
+            $cPkg = (Read-Host "请输入目标包名").Trim()
+            if ($cPkg) { $targetsToSync += [PSCustomObject]@{ Package = $cPkg; Name = Get-PkgDisplayName $cPkg; IsCN = $true } }
+        }
+    } else {
+        Write-Host "`n请选择要同步资源的目标区服：" -ForegroundColor Yellow
+        Write-Host "  [A] 一键同步到所有其他已安装区服 (推荐)" -ForegroundColor Green
+        for ($i = 0; $i -lt $candidates.Count; $i++) {
+            Write-Host "  [$($i + 1)] $($candidates[$i].Name) [$($candidates[$i].Package)] (当前版本: $($candidates[$i].Version))"
+        }
+        Write-Host "  [0] 手动输入其他自定义包名"
+
+        $sel = Read-Host "`n请输入选项 (A 或数字，默认 A)"
+        if ($sel -eq "" -or $sel -match "^[Aa]") {
+            $targetsToSync = $candidates
+        } elseif ($sel -eq "0") {
+            $cPkg = (Read-Host "请输入目标包名").Trim()
+            if ($cPkg) { $targetsToSync += [PSCustomObject]@{ Package = $cPkg; Name = Get-PkgDisplayName $cPkg; IsCN = $true } }
+        } else {
+            $idx = [int]$sel - 1
+            if ($idx -ge 0 -and $idx -lt $candidates.Count) { $targetsToSync += $candidates[$idx] }
+            else { $targetsToSync = $candidates }
+        }
+    }
+
+    if ($targetsToSync.Count -eq 0) { return }
+
+    Write-Host "`n请选择资源共享模式：" -ForegroundColor Yellow
+    Write-Host "  [1] 底层硬链接模式 (推荐：零额外空间占用，1~2 秒完成)" -ForegroundColor Cyan
+    Write-Host "  [2] 模拟器内完整复制 (额外占用 29GB，约 1~2 分钟)" -ForegroundColor Cyan
+    $mode = Read-Host "请输入模式 (1 或 2，默认 1)"
+    if ($mode -ne "2") { $mode = "1" }
+
+    foreach ($t in $targetsToSync) {
+        Write-Host "  -> 正在同步到 $($t.Name) [$($t.Package)]..." -ForegroundColor Cyan
+        & $adb -s $device shell "am force-stop $($t.Package)" | Out-Null
+        Sync-PackageWithinDevice $adb $device $sourceObj.Package $t.Package $t.IsCN $mode
+        Write-Host "  [√] $($t.Name) 同步完成！" -ForegroundColor Green
+    }
+}
+
+function Invoke-CrossDeviceDiffSync($adb, $devices) {
+    Write-Host "`n>>> 正在扫描所有已连接设备上的碧蓝航线版本..." -ForegroundColor Green
+    $deviceMap = @{}
+    for ($i = 0; $i -lt $devices.Count; $i++) {
+        $dev = $devices[$i]
+        $pkgs = Get-DeviceAzurLanePackages $adb $dev
+        $deviceMap[$dev] = $pkgs
+        Write-Host "`n  设备 [$($i + 1)] ($dev):" -ForegroundColor Yellow
+        foreach ($p in $pkgs) {
+            Write-Host "    - $($p.Name) [$($p.Package)] | 版本: $($p.Version) | 资源目录数: $($p.DirCount)"
+        }
+    }
+
+    $srcIdx = [int](Read-Host "`n请选择【源设备】编号（拥有最新完整资源的设备，默认 1）") - 1
+    if ($srcIdx -lt 0 -or $srcIdx -ge $devices.Count) { $srcIdx = 0 }
+    $srcDev = $devices[$srcIdx]
+
+    $srcPkgs = @($deviceMap[$srcDev] | Where-Object { $_.DirCount -ge 150 })
+    if ($srcPkgs.Count -eq 0) {
+        Write-Host "[错误] 源设备 [$srcDev] 上没有完整资源包！" -ForegroundColor Red
+        return
+    }
+    $srcPkgObj = $srcPkgs[0]
+    if ($srcPkgs.Count -gt 1) {
+        Write-Host "`n源设备上有多个完整资源客户端，请选择作为更新基准的源服：" -ForegroundColor Yellow
+        for ($j = 0; $j -lt $srcPkgs.Count; $j++) {
+            Write-Host "  [$($j + 1)] $($srcPkgs[$j].Name) [$($srcPkgs[$j].Package)] (版本: $($srcPkgs[$j].Version))"
+        }
+        $pIdx = [int](Read-Host "请输入编号 (默认 1)") - 1
+        if ($pIdx -ge 0 -and $pIdx -lt $srcPkgs.Count) { $srcPkgObj = $srcPkgs[$pIdx] }
+    }
+
+    $dstDevices = @($devices | Where-Object { $_ -ne $srcDev })
+    foreach ($dstDev in $dstDevices) {
+        $dstPkgs = $deviceMap[$dstDev]
+        if ($dstPkgs.Count -eq 0) {
+            Write-Host "`n[跳过] 目标设备 [$dstDev] 未安装碧蓝航线。" -ForegroundColor Yellow
+            continue
+        }
+
+        Write-Host "`n>>> 正在对比差异并同步 [$srcDev ($($srcPkgObj.Version))] -> [$dstDev]..." -ForegroundColor Cyan
+        foreach ($dp in $dstPkgs) { & $adb -s $dstDev shell "am force-stop $($dp.Package)" | Out-Null }
+
+        $primaryDst = $dstPkgs | Where-Object { $_.Package -eq $srcPkgObj.Package } | Select-Object -First 1
+        if (-not $primaryDst) {
+            $primaryDst = $dstPkgs | Sort-Object DirCount -Descending | Select-Object -First 1
+        }
+
+        $tmpDir = Join-Path $env:TEMP ("azurlane_diff_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+        New-Item -ItemType Directory -Force -Path "$tmpDir\src", "$tmpDir\dst" | Out-Null
+
+        try {
+            $srcFilesRoot = "/data/media/0/Android/data/$($srcPkgObj.Package)/files"
+            $dstFilesRoot = "/data/media/0/Android/data/$($primaryDst.Package)/files"
+
+            Write-Host "  1. 拉取源端与目标端哈希校验清单..." -ForegroundColor Gray
+            & $adb -s $srcDev shell "ls $srcFilesRoot/hashes*.csv $srcFilesRoot/version*.txt 2>/dev/null" | ForEach-Object {
+                $f = $_.Trim()
+                if ($f) { & $adb -s $srcDev pull $f "$tmpDir\src\" | Out-Null }
+            }
+            & $adb -s $dstDev shell "ls $dstFilesRoot/hashes*.csv 2>/dev/null" | ForEach-Object {
+                $f = $_.Trim()
+                if ($f) { & $adb -s $dstDev pull $f "$tmpDir\dst\" | Out-Null }
+            }
+
+            $oldMap = @{}
+            Get-ChildItem "$tmpDir\dst\hashes*.csv" -ErrorAction SilentlyContinue | ForEach-Object {
+                Get-Content $_.FullName | ForEach-Object {
+                    $parts = $_ -split ','
+                    if ($parts.Length -ge 3) { $oldMap[$parts[0]] = "$($parts[1]),$($parts[2])" }
+                }
+            }
+
+            $newMap = @{}
+            $diffList = [System.Collections.Generic.List[string]]::new()
+            $diffBytes = [long]0
+            Get-ChildItem "$tmpDir\src\hashes*.csv" | ForEach-Object {
+                Get-Content $_.FullName | ForEach-Object {
+                    $parts = $_ -split ','
+                    if ($parts.Length -ge 3) {
+                        $path = $parts[0]
+                        $sig = "$($parts[1]),$($parts[2])"
+                        $newMap[$path] = $true
+                        if (-not $oldMap.ContainsKey($path) -or $oldMap[$path] -ne $sig) {
+                            $diffList.Add($path)
+                            $diffBytes += [long]$parts[1]
+                        }
+                    }
+                }
+            }
+            $diffUnique = @($diffList | Select-Object -Unique)
+            $obsoleteList = @($oldMap.Keys | Where-Object { -not $newMap.ContainsKey($_) })
+
+            if ($obsoleteList.Count -gt 0) {
+                [System.IO.File]::WriteAllText("$tmpDir\del_list.txt", ($obsoleteList -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+                & $adb -s $dstDev push "$tmpDir\del_list.txt" /data/local/tmp/del_list.txt | Out-Null
+                & $adb -s $dstDev shell "cd $dstFilesRoot/AssetBundles 2>/dev/null && while IFS= read -r f; do rm -f `"`$f`"; done < /data/local/tmp/del_list.txt; rm -f /data/local/tmp/del_list.txt" | Out-Null
+            }
+
+            if ($diffUnique.Count -gt 0) {
+                $sizeMb = [math]::Round($diffBytes / 1MB, 2)
+                Write-Host "  2. 发现 $($diffUnique.Count) 个新增/变更资源文件（约 $sizeMb MB），正在打包传输..." -ForegroundColor Yellow
+
+                [System.IO.File]::WriteAllText("$tmpDir\diff_list.txt", ($diffUnique -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+                & $adb -s $srcDev push "$tmpDir\diff_list.txt" /data/local/tmp/diff_list.txt | Out-Null
+
+                $packCmd = "cd $srcFilesRoot/AssetBundles && rm -f /data/local/tmp/diff_existing.txt /data/local/tmp/diff_assets.tar && " +
+                           "while IFS= read -r f; do [ -f `"`$f`" ] && echo `"`$f`"; done < /data/local/tmp/diff_list.txt > /data/local/tmp/diff_existing.txt && " +
+                           "tar -cf /data/local/tmp/diff_assets.tar -T /data/local/tmp/diff_existing.txt"
+                & $adb -s $srcDev shell $packCmd | Out-Null
+                & $adb -s $srcDev pull /data/local/tmp/diff_assets.tar "$tmpDir\diff_assets.tar" | Out-Null
+                & $adb -s $srcDev shell "rm -f /data/local/tmp/diff_assets.tar /data/local/tmp/diff_list.txt /data/local/tmp/diff_existing.txt" | Out-Null
+
+                Write-Host "  3. 正在写入目标设备 [$dstDev] 并解除旧硬链接冲突..." -ForegroundColor Gray
+                & $adb -s $dstDev push "$tmpDir\diff_assets.tar" /data/local/tmp/diff_assets.tar | Out-Null
+
+                foreach ($other in $dstPkgs) {
+                    if ($other.Package -ne $primaryDst.Package) {
+                        & $adb -s $dstDev shell "rm -rf /data/media/0/Android/data/$($other.Package)/files/AssetBundles" | Out-Null
+                    }
+                }
+
+                & $adb -s $dstDev shell "mkdir -p $dstFilesRoot/AssetBundles && tar -xf /data/local/tmp/diff_assets.tar -C $dstFilesRoot/AssetBundles && rm -f /data/local/tmp/diff_assets.tar" | Out-Null
+            } else {
+                Write-Host "  2. 资源文件已完全一致，仅同步版本校验文件..." -ForegroundColor Green
+            }
+
+            Write-Host "  4. 同步校验文件、修复权限并对设备内其他区服建立硬链接..." -ForegroundColor Gray
+            Get-ChildItem "$tmpDir\src\*" | ForEach-Object {
+                & $adb -s $dstDev push $_.FullName "$dstFilesRoot/$($_.Name)" | Out-Null
+            }
+            $pUid = (& $adb -s $dstDev shell "stat -c '%u' /data/data/$($primaryDst.Package) 2>/dev/null || echo 10000").Trim()
+            if (-not $pUid) { $pUid = "10000" }
+            & $adb -s $dstDev shell "chmod -R 777 $dstFilesRoot && chown -R ${pUid}:ext_data_rw /data/media/0/Android/data/$($primaryDst.Package)" | Out-Null
+
+            foreach ($other in $dstPkgs) {
+                if ($other.Package -ne $primaryDst.Package) {
+                    Sync-PackageWithinDevice $adb $dstDev $primaryDst.Package $other.Package $other.IsCN "1"
+                    Write-Host "    [√] 设备内 $($other.Name) 已通过硬链接共享最新资源！" -ForegroundColor Green
+                }
+            }
+            Write-Host "  [√] 设备 [$dstDev] 跨设备增量同步完成！" -ForegroundColor Green
+        } finally {
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# 主流程入口
+# ------------------------------------------------------------------------------
+Write-Host "`n[1/3] 正在搜索并定位模拟器 ADB 通信环境..." -ForegroundColor Green
 $ADB_PATH = Find-MuMuAdb
 
 while (-not $ADB_PATH -or -not (Test-Path $ADB_PATH)) {
@@ -91,226 +358,67 @@ while (-not $ADB_PATH -or -not (Test-Path $ADB_PATH)) {
 }
 Write-Host "  -> 已定位 ADB: $ADB_PATH" -ForegroundColor Gray
 
-# ------------------------------------------------------------------------------
-# 2. 智能探测与连接活动端口
-# ------------------------------------------------------------------------------
-Write-Host "`n[2/5] 正在连接活动中的模拟器实例..." -ForegroundColor Green
+Write-Host "`n[2/3] 正在探测所有运行中的模拟器实例..." -ForegroundColor Green
+$candidatePorts = @(16384, 16416, 16448, 16480, 7555, 5555)
+$listenPorts = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+               Where-Object { $_.LocalPort -ge 16384 -and $_.LocalPort -le 16600 } |
+               Select-Object -ExpandProperty LocalPort -Unique
+if ($listenPorts) {
+    $candidatePorts = @($listenPorts + $candidatePorts | Select-Object -Unique)
+}
 
-$portsToTry = @(16384, 7555, 5555)
-$CONNECTED_DEVICE = $null
-
-foreach ($port in $portsToTry) {
+$connectedDevices = @()
+foreach ($port in $candidatePorts) {
     $dev = "127.0.0.1:$port"
     & $ADB_PATH connect $dev | Out-Null
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds 300
     $state = (& $ADB_PATH -s $dev get-state 2>$null)
     if ($state -eq "device") {
-        $CONNECTED_DEVICE = $dev
-        break
+        & $ADB_PATH -s $dev root | Out-Null
+        Start-Sleep -Milliseconds 600
+        & $ADB_PATH connect $dev | Out-Null
+        $connectedDevices += $dev
     }
 }
 
-if (-not $CONNECTED_DEVICE) {
-    # 尝试默认检测到的第一个设备
+if ($connectedDevices.Count -eq 0) {
     $devs = (& $ADB_PATH devices) | Where-Object { $_ -match "\tdevice" }
-    if ($devs) {
-        $CONNECTED_DEVICE = ($devs[0] -split "`t")[0]
+    foreach ($d in $devs) {
+        $devId = ($d -split "`t")[0]
+        & $ADB_PATH -s $devId root | Out-Null
+        $connectedDevices += $devId
     }
 }
 
-if (-not $CONNECTED_DEVICE) {
+if ($connectedDevices.Count -eq 0) {
     Write-Host "[错误] 无法连接到正在运行的 MuMu 模拟器，请确认模拟器已打开！" -ForegroundColor Red
     Pause
     Exit
 }
 
-Write-Host "  -> 成功连接到模拟器实例: $CONNECTED_DEVICE" -ForegroundColor Cyan
+Write-Host "  -> 共检测到 $($connectedDevices.Count) 台在线设备: $($connectedDevices -join ', ')" -ForegroundColor Cyan
 
-# 切换为 root
-Write-Host "  -> 申请 ADB root 权限..." -ForegroundColor Gray
-& $ADB_PATH -s $CONNECTED_DEVICE root | Out-Null
-Start-Sleep -Milliseconds 1200
-& $ADB_PATH connect $CONNECTED_DEVICE | Out-Null
-Start-Sleep -Milliseconds 600
-
-# ------------------------------------------------------------------------------
-# 3. 扫描已安装的所有碧蓝航线客户端
-# ------------------------------------------------------------------------------
-Write-Host "`n[3/5] 正在扫描模拟器内安装的所有碧蓝航线版本..." -ForegroundColor Green
-
-$allPresets = @{
-    "com.bilibili.azurlane"               = @{ Name = "B站官方服 / 官服"; IsCN = $true }
-    "com.bilibili.blhx.mi"                = @{ Name = "小米渠道服"; IsCN = $true }
-    "com.bilibili.blhx.uc"                = @{ Name = "九游 / UC 渠道服"; IsCN = $true }
-    "com.bilibili.blhx.vivo"              = @{ Name = "vivo 渠道服"; IsCN = $true }
-    "com.bilibili.blhx.huawei"            = @{ Name = "华为渠道服"; IsCN = $true }
-    "com.bilibili.azurlane.huawei"         = @{ Name = "华为渠道服 (旧)"; IsCN = $true }
-    "com.tencent.tmgp.bilibili.azurlane"  = @{ Name = "腾讯应用宝渠道服"; IsCN = $true }
-    "com.bilibili.blhx.nearme.gamecenter" = @{ Name = "OPPO 渠道服"; IsCN = $true }
-    "com.YoStarJP.AzurLane"               = @{ Name = "日服 (JP)"; IsCN = $false }
-    "com.YoStarEN.AzurLane"               = @{ Name = "国际服 / 美服 (EN)"; IsCN = $false }
-    "tw.sonet.bldhx"                      = @{ Name = "台服 (TW)"; IsCN = $false }
-    "com.hkmanjuu.azurlane.gp"            = @{ Name = "台服 (TW Google Play)"; IsCN = $false }
-    "com.xdg.p10010"                      = @{ Name = "韩服 (KR)"; IsCN = $false }
-}
-
-$installedPackagesRaw = & $ADB_PATH -s $CONNECTED_DEVICE shell "pm list packages -3"
-$installedPkgList = @()
-
-foreach ($line in $installedPackagesRaw) {
-    if ($line -match "package:(.+)") {
-        $p = $matches[1].Trim()
-        if ($allPresets.ContainsKey($p) -or $p -like "*azurlane*" -or $p -like "*blhx*") {
-            $installedPkgList += $p
+Write-Host "`n[3/3] 进入同步工作流..." -ForegroundColor Green
+if ($connectedDevices.Count -ge 2) {
+    Write-Host "`n检测到您同时开启了多台模拟器设备，请选择工作模式：" -ForegroundColor Yellow
+    Write-Host "  [1] 跨设备增量同步（将设备 A 最新资源增量同步到设备 B，并在 B 内部自动硬链接，推荐）" -ForegroundColor Green
+    Write-Host "  [2] 单设备内换服（仅操作某一台指定设备内部）" -ForegroundColor Cyan
+    $workMode = Read-Host "请输入选择 (1 或 2，默认 1)"
+    if ($workMode -eq "2") {
+        for ($i = 0; $i -lt $connectedDevices.Count; $i++) {
+            Write-Host "  [$($i + 1)] $($connectedDevices[$i])"
         }
-    }
-}
-
-if ($installedPkgList.Count -eq 0) {
-    Write-Host "[错误] 模拟器内未检测到任何碧蓝航线客户端！请先在模拟器中安装游戏。" -ForegroundColor Red
-    Pause
-    Exit
-}
-
-# ------------------------------------------------------------------------------
-# 4. 自动检测哪一个包是拥有完整 29GB 数据的“源（Source）”
-# ------------------------------------------------------------------------------
-Write-Host "`n[4/5] 正在分析资源包完整度以确定源数据 (Source)..." -ForegroundColor Green
-
-$sourcePkg = $null
-$candidatesWithoutFullAssets = @()
-
-foreach ($pkg in $installedPkgList) {
-    $bundlePath = "/data/media/0/Android/data/$pkg/files/AssetBundles"
-    $checkCmd = "test -d $bundlePath && ls $bundlePath 2>/dev/null | wc -l || echo 0"
-    $dirCount = [int]((& $ADB_PATH -s $CONNECTED_DEVICE shell $checkCmd).Trim())
-    
-    $displayName = if ($allPresets.ContainsKey($pkg)) { $allPresets[$pkg].Name } else { "自定义区服" }
-    
-    if ($dirCount -ge 150) {
-        Write-Host "  [√] 发现完整资源库: $displayName [$pkg] (包含 $dirCount 个分类目录，约 29GB)" -ForegroundColor Green
-        if (-not $sourcePkg) { $sourcePkg = $pkg }
+        $dIdx = [int](Read-Host "请选择要操作的设备编号 (默认 1)") - 1
+        if ($dIdx -lt 0 -or $dIdx -ge $connectedDevices.Count) { $dIdx = 0 }
+        Invoke-SingleDeviceSync $ADB_PATH $connectedDevices[$dIdx]
     } else {
-        Write-Host "  [-] 待同步目标服: $displayName [$pkg] (未下载完整资源)" -ForegroundColor Yellow
-        $candidatesWithoutFullAssets += $pkg
-    }
-}
-
-if (-not $sourcePkg) {
-    Write-Host "`n[核心前提未满足] 模拟器中未能找到拥有完整资源的客户端！" -ForegroundColor Red
-    Write-Host "请先在任意一个服（例如 B服）内完整下载全部游戏数据（约 29GB），然后再运行本工具进行跨服复用。" -ForegroundColor Yellow
-    Pause
-    Exit
-}
-
-$sourceName = if ($allPresets.ContainsKey($sourcePkg)) { $allPresets[$sourcePkg].Name } else { $sourcePkg }
-Write-Host "`n>> 当前已选定完整数据源: $sourceName [$sourcePkg]" -ForegroundColor Cyan
-
-# ------------------------------------------------------------------------------
-# 5. 选择要同步的目标服务器
-# ------------------------------------------------------------------------------
-$targetsToSync = @()
-
-if ($candidatesWithoutFullAssets.Count -eq 0) {
-    Write-Host "`n检测到所有已安装的客户端均已具备完整资源！" -ForegroundColor Green
-    $customChoice = Read-Host "是否需要手动输入新安装的其他包名进行映射？(Y/N，默认 N)"
-    if ($customChoice -match "^[Yy]") {
-        $customPkg = Read-Host "请输入目标包名"
-        if ($customPkg) { $targetsToSync += $customPkg.Trim() }
-    } else {
-        Write-Host "无需重复操作，退出。" -ForegroundColor Cyan
-        Pause
-        Exit
+        Invoke-CrossDeviceDiffSync $ADB_PATH $connectedDevices
     }
 } else {
-    Write-Host "`n请选择您要同步资源的目标区服：" -ForegroundColor Yellow
-    Write-Host "  [A] 一键同步到所有其他已安装区服 (推荐，自动批量完成)" -ForegroundColor Green
-    for ($i = 0; $i -lt $candidatesWithoutFullAssets.Count; $i++) {
-        $tPkg = $candidatesWithoutFullAssets[$i]
-        $tName = if ($allPresets.ContainsKey($tPkg)) { $allPresets[$tPkg].Name } else { $tPkg }
-        Write-Host "  [$($i + 1)] 仅同步到: $tName [$tPkg]"
-    }
-    Write-Host "  [0] 手动输入其他自定义包名"
-
-    $sel = Read-Host "`n请输入选项 (A 或数字，默认 A)"
-    if ($sel -eq "" -or $sel -match "^[Aa]") {
-        $targetsToSync = $candidatesWithoutFullAssets
-    } elseif ($sel -eq "0") {
-        $customPkg = Read-Host "请输入目标包名"
-        if ($customPkg) { $targetsToSync += $customPkg.Trim() }
-    } else {
-        $idx = [int]$sel - 1
-        if ($idx -ge 0 -and $idx -lt $candidatesWithoutFullAssets.Count) {
-            $targetsToSync += $candidatesWithoutFullAssets[$idx]
-        } else {
-            $targetsToSync = $candidatesWithoutFullAssets
-        }
-    }
-}
-
-# ------------------------------------------------------------------------------
-# 6. 选择复用模式
-# ------------------------------------------------------------------------------
-Write-Host "`n请选择资源共享模式：" -ForegroundColor Yellow
-Write-Host "  [1] 底层硬链接模式 (推荐：零额外磁盘空间占用，1~2 秒瞬间完成)" -ForegroundColor Cyan
-Write-Host "  [2] 模拟器内完整复制 (每个服额外占用 29GB 磁盘，完全独立，约 1~2 分钟)" -ForegroundColor Cyan
-$mode = Read-Host "请输入模式 (1 或 2，默认 1)"
-if ($mode -ne "2") { $mode = "1" }
-
-# ------------------------------------------------------------------------------
-# 7. 开始批量执行同步与权限修复
-# ------------------------------------------------------------------------------
-Write-Host "`n[5/5] 正在执行跨服资源共享与 Android 权限沙箱适配..." -ForegroundColor Green
-
-$srcDir = "/data/media/0/Android/data/$sourcePkg/files/AssetBundles"
-
-foreach ($target in $targetsToSync) {
-    $tDisplayName = if ($allPresets.ContainsKey($target)) { $allPresets[$target].Name } else { $target }
-    Write-Host "`n>>> 正在处理: $tDisplayName [$target]..." -ForegroundColor Cyan
-
-    $dstDataDir = "/data/media/0/Android/data/$target"
-    $dstFilesDir = "$dstDataDir/files"
-    $dstBundleDir = "$dstFilesDir/AssetBundles"
-
-    # 获取目标应用 Linux UID
-    $getUidCmd = "stat -c '%u' /data/data/$target 2>/dev/null || echo 10000"
-    $targetUid = (& $ADB_PATH -s $CONNECTED_DEVICE shell $getUidCmd).Trim()
-    if (-not $targetUid -or $targetUid -eq "") { $targetUid = "10000" }
-
-    # 创建目标目录
-    & $ADB_PATH -s $CONNECTED_DEVICE shell "mkdir -p $dstFilesDir" | Out-Null
-
-    # 判断是否为国服（国服同步哈希表，外服保留其自身哈希）
-    $isCN = if ($allPresets.ContainsKey($target)) { $allPresets[$target].IsCN } else { $true }
-
-    if ($mode -eq "1") {
-        Write-Host "  -> 正在创建 Linux 底层硬链接..." -ForegroundColor Gray
-        $linkScript = "rm -rf $dstBundleDir && cp -al $srcDir $dstFilesDir/"
-        if ($isCN) {
-            $linkScript += " && cp -a /data/media/0/Android/data/$sourcePkg/files/hashes* $dstFilesDir/ && cp -a /data/media/0/Android/data/$sourcePkg/files/version* $dstFilesDir/"
-        }
-        $linkScript += " && chmod -R 777 $dstFilesDir && chown -R $targetUid:ext_data_rw $dstDataDir"
-        & $ADB_PATH -s $CONNECTED_DEVICE shell $linkScript | Out-Null
-    } else {
-        Write-Host "  -> 正在复制文件 (约 29GB，请稍候)..." -ForegroundColor Gray
-        $copyScript = "rm -rf $dstBundleDir && cp -r $srcDir $dstFilesDir/"
-        if ($isCN) {
-            $copyScript += " && cp -a /data/media/0/Android/data/$sourcePkg/files/hashes* $dstFilesDir/ && cp -a /data/media/0/Android/data/$sourcePkg/files/version* $dstFilesDir/"
-        }
-        $copyScript += " && chmod -R 777 $dstFilesDir && chown -R $targetUid:ext_data_rw $dstDataDir"
-        & $ADB_PATH -s $CONNECTED_DEVICE shell $copyScript | Out-Null
-    }
-
-    Write-Host "  [√] $tDisplayName 资源部署成功！" -ForegroundColor Green
+    Invoke-SingleDeviceSync $ADB_PATH $connectedDevices[0]
 }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "   🎉 碧蓝航线全部目标区服资源跨服同步已全部成功！          " -ForegroundColor Green
+Write-Host "   🎉 碧蓝航线资源跨服同步流程已全部完成！                  " -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "【游玩指引】：
-1. 现在可以直接在模拟器中启动对应的目标区服；
-2. 国服渠道服将直接识别通过，0 下载秒进游戏；
-3. 外服（日/美/台）将直接继承全量语音包与通用资源，仅从外服增量下载少量特有立绘。
-" -ForegroundColor Yellow
-
 Pause
